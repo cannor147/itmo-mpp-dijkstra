@@ -2,40 +2,97 @@ package dijkstra
 
 import java.util.*
 import java.util.concurrent.Phaser
+import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.Comparator
+import kotlin.collections.ArrayList
 import kotlin.concurrent.thread
 
 private val NODE_DISTANCE_COMPARATOR = Comparator<Node> { o1, o2 -> Integer.compare(o1!!.distance, o2!!.distance) }
 
-// Returns `Integer.MAX_VALUE` if a path has not been found.
 fun shortestPathParallel(start: Node) {
     val workers = Runtime.getRuntime().availableProcessors()
-    // The distance to the start node is `0`
     start.distance = 0
-    // Create a priority (by distance) queue and add the start node into it
-    val q = PriorityQueue(workers, NODE_DISTANCE_COMPARATOR) // TODO replace me with a multi-queue based PQ!
+    val q = MulitQueue(workers)
     q.add(start)
-    // Run worker threads and wait until the total work is done
-    val onFinish = Phaser(workers + 1) // `arrive()` should be invoked at the end by each worker
+    val activeNodes = AtomicInteger(1)
+    val onFinish = Phaser(workers + 1)
     repeat(workers) {
         thread {
             while (true) {
-                // TODO Write the required algorithm here,
-                // TODO break from this loop when there is no more node to process.
-                // TODO Be careful, "empty queue" != "all nodes are processed".
-//                val cur: Node? = synchronized(q) { q.poll() }
-//                if (cur == null) {
-//                    if (workIsDone) break else continue
-//                }
-//                for (e in cur.outgoingEdges) {
-//                    if (e.to.distance > cur.distance + e.weight) {
-//                        e.to.distance = cur.distance + e.weight
-//                        q.addOrDecreaseKey(e.to)
-//                    }
-//                }
+                val cur = q.poll()
+                if (cur == null) {
+                    if (activeNodes.get() == 0) {
+                        break
+                    } else {
+                        continue
+                    }
+                }
+                for (e in cur.outgoingEdges) {
+                    while (true) {
+                        val currentDistance = e.to.distance
+                        val x = cur.distance + e.weight
+                        if (currentDistance > x) {
+                            if (e.to.casDistance(currentDistance, x)) {
+                                q.add(e.to)
+                                activeNodes.incrementAndGet()
+                                break
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                }
+                activeNodes.decrementAndGet()
             }
             onFinish.arrive()
         }
     }
     onFinish.arriveAndAwaitAdvance()
+}
+
+class MulitQueue(private val workers: Int) {
+    private val queues = ArrayList<Queue<Node>>(workers)
+
+    init {
+        for (i in 1..workers) {
+            queues.add(PriorityQueue(NODE_DISTANCE_COMPARATOR))
+        }
+    }
+
+    fun add(node: Node) {
+        val index = ThreadLocalRandom.current().nextInt(workers)
+        val q = queues[index]
+
+        synchronized(q) {
+            q.add(node)
+        }
+    }
+
+    fun poll(): Node? {
+        while (true) {
+            val firstIndex = ThreadLocalRandom.current().nextInt(workers)
+            val secondIndex = ThreadLocalRandom.current().nextInt(workers)
+            if (firstIndex == secondIndex) {
+                continue
+            }
+
+            val q1 = queues[minOf(firstIndex, secondIndex)]
+            val q2 = queues[maxOf(firstIndex, secondIndex)]
+
+            synchronized(q1) {
+                synchronized(q2) {
+                    val x1 = q1.peek()
+                    val x2 = q2.peek()
+                    return when {
+                        x1 == null && x2 == null -> null
+                        x1 != null && x2 == null -> q1.poll()
+                        x1 == null && x2 != null -> q2.poll()
+                        NODE_DISTANCE_COMPARATOR.compare(x1, x2) < 0 -> q1.poll()
+                        else -> q2.poll()
+                    }
+                }
+            }
+        }
+    }
 }
